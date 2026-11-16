@@ -96,6 +96,14 @@ std::string_view failure_text(int code) {
     }
 }
 
+void log_probe_exit(std::string_view netns_name, int code) {
+    if (code == kExitOk) {
+        logger::info("netns={} probe exit={}", netns_name, code);
+        return;
+    }
+    logger::error("netns={} probe exit={}: {}", netns_name, code, failure_text(code));
+}
+
 } // namespace
 
 int execute_probe(std::string_view netns_name,
@@ -114,16 +122,16 @@ int execute_probe(std::string_view netns_name,
     const int fd = ::open(resolved->c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         if (errno == EACCES || errno == EPERM) {
-            std::println(stderr, "open {}: permission denied", resolved->string());
+            logger::error("open {}: permission denied", resolved->string());
             return kExitPermission;
         }
-        std::println(stderr, "open {}: {}", resolved->string(), std::strerror(errno));
+        logger::error("open {}: {}", resolved->string(), std::strerror(errno));
         return kExitMissing;
     }
     if (::setns(fd, CLONE_NEWNET) != 0) {
         const int err = errno;
         close_fd(fd);
-        std::println(stderr, "setns {}: {}", resolved->string(), std::strerror(err));
+        logger::error("setns {}: {}", resolved->string(), std::strerror(err));
         return kExitPermission;
     }
     close_fd(fd);
@@ -185,8 +193,7 @@ std::expected<ProbeResult, int> run_probe(std::string_view netns_name,
     // Argument strings are built here, before fork, so the child does not allocate.
     const auto resolved = resolve_netns_path(netns_name);
     if (!resolved) {
-        logger::error("Config: {}", resolved.error());
-        logger::info("netns={} probe exit={}", netns_name, kExitMissing);
+        logger::error("netns={} probe exit={}: {}", netns_name, kExitMissing, resolved.error());
         return std::unexpected(kExitMissing);
     }
 
@@ -213,7 +220,7 @@ std::expected<ProbeResult, int> run_probe(std::string_view netns_name,
     std::array<int, 2> fds{-1, -1};
     if (::pipe2(fds.data(), O_CLOEXEC) != 0) {
         logger::error("pipe2: {}", std::strerror(errno));
-        logger::info("netns={} probe exit={}", netns_name, kExitBadOutput);
+        log_probe_exit(netns_name, kExitBadOutput);
         return std::unexpected(kExitBadOutput);
     }
 
@@ -223,7 +230,7 @@ std::expected<ProbeResult, int> run_probe(std::string_view netns_name,
         close_fd(fds[0]);
         close_fd(fds[1]);
         logger::error("fork: {}", std::strerror(err));
-        logger::info("netns={} probe exit={}", netns_name, kExitBadOutput);
+        log_probe_exit(netns_name, kExitBadOutput);
         return std::unexpected(kExitBadOutput);
     }
     if (pid == 0) {
@@ -247,11 +254,8 @@ std::expected<ProbeResult, int> run_probe(std::string_view netns_name,
     int code = kExitBadOutput;
     if (waited == pid && WIFEXITED(status)) code = WEXITSTATUS(status);
 
-    logger::info("netns={} probe exit={}", netns_name, code);
-    if (code != kExitOk) {
-        logger::error("{}", failure_text(code));
-        return std::unexpected(code);
-    }
+    log_probe_exit(netns_name, code);
+    if (code != kExitOk) return std::unexpected(code);
 
     auto parsed = parse_probe_output(output);
     if (!parsed) {

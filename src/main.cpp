@@ -196,7 +196,7 @@ CacheCheckResult check_cache_and_decide_skip(const std::string& current_ip,
     }
     if (!result.last_ip.empty()) {
         if (result.last_ip == current_ip) {
-            logger::info("IP has not changed since last run: {} — skipping DDNS update", current_ip);
+            logger::success("Done: IPv6 {} is unchanged, DNS update skipped", current_ip);
             result.skip = true;
         } else {
             logger::info("IP changed from {} to {}", result.last_ip, current_ip);
@@ -305,7 +305,8 @@ int run_cmd(const std::filesystem::path& config_path,
 
     const CurrentIp found = get_current_ip(cfg, timeout_sec);
     if (found.ip.empty()) {
-        logger::error("Failed to get current IP");
+        // Probe failures already logged the exit code and reason. A host miss uses code 1.
+        if (found.failure_code <= 1) logger::error("Failed to get current IP");
         curl_pool::cleanup();
         return found.failure_code == 0 ? 1 : found.failure_code;
     }
@@ -322,7 +323,11 @@ int run_cmd(const std::filesystem::path& config_path,
     int success_count = 0;
     int fail_count = 0;
     update_records_parallel(cfg, found.ip, zone_id_cache_file, timeout_sec, success_count, fail_count);
-    logger::info("Update completed: {} succeeded, {} failed", success_count, fail_count);
+    if (fail_count == 0) {
+        logger::success("Done: {} record(s) updated, {} failed", success_count, fail_count);
+    } else {
+        logger::error("Done: {} record(s) updated, {} failed", success_count, fail_count);
+    }
     if (success_count > 0) update_cache(cache_file, found.ip, cache_check.last_ip, ignore_cache);
 
     curl_pool::cleanup();

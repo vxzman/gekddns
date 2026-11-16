@@ -94,7 +94,7 @@ cp config.example.json config.json
 
 选出地址时丢掉链路本地、ULA、环回和已弃用地址。剩下的全局单播里，取 preferred lifetime 最长的。生命周期用内核原始的 pltime/vltime，和 `ifconfig` 不加 `-L` 时一致。`0xffffffff` 视为永久。
 
-IP 没变则跳过更新。缓存文件 `cache.lastip` 只保留最后一次 IP，放在配置文件旁边；`-d` 可以改目录。旧的「时间 IP」多行缓存仍能读出最后一条。
+IP 没变则跳过更新，最后一行是 `[SUCCESS] Done: IPv6 ... is unchanged, DNS update skipped`。记录有改动且全部成功时，最后一行是 `[SUCCESS] Done: N record(s) updated, 0 failed`。缓存文件 `cache.lastip` 只保留最后一次 IP，放在配置文件旁边；`-d` 可以改目录。旧的「时间 IP」多行缓存仍能读出最后一条。
 
 ## 运行
 
