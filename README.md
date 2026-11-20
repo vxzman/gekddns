@@ -78,8 +78,10 @@ cp config.example.json config.json
 
 | 字段 | 含义 |
 |------|------|
-| `netns` | 可选，仅 Linux。留空则在宿主机上取地址。名字对应 `/run/netns/<名字>`，也可以写该目录下的绝对路径。非空时必须同时写 `interface` |
-| `interface` | 网卡名。Linux 上例如 `eth0`，FreeBSD 上例如 `vtnet0`。和 `fallback_urls` 至少写一个。设了 `netns` 时必填 |
+| `netns` | 可选，仅 Linux。留空则在宿主机上取地址。名字对应 `/run/netns/<名字>`，也可以写该目录下的绝对路径。非空时必须同时写 `interface`。有 `sources` 时不要写在顶层 |
+| `interface` | 网卡名。Linux 上例如 `eth0`，FreeBSD 上例如 `vtnet0`。和 `fallback_urls` 至少写一个。设了 `netns` 时必填。有 `sources` 时不要写在顶层 |
+| `sources` | 可选。多个地址源。每项有 `id`、`netns`、`interface`，以及可选的 `fallback_urls`（省略则用顶层） |
+| `records[].source` | 指向 `sources[].id`。多个源时必填 |
 | `fallback_urls` | 网卡获取失败时按顺序尝试的 HTTP 地址。这些请求不走代理，也没有真实的地址生命周期 |
 | `proxy` | DNS API 代理，支持 `http`、`https`、`socks5`、`socks5h`。留空表示不使用 |
 | `cloudflare.token` | Cloudflare API Token，需要 `Zone:DNS:Edit` |
@@ -94,7 +96,7 @@ cp config.example.json config.json
 
 选出地址时丢掉链路本地、ULA、环回和已弃用地址。剩下的全局单播里，取 preferred lifetime 最长的。生命周期用内核原始的 pltime/vltime，和 `ifconfig` 不加 `-L` 时一致。`0xffffffff` 视为永久。
 
-IP 没变则跳过更新，最后一行是 `[SUCCESS] Done: IPv6 ... is unchanged, DNS update skipped`。记录有改动且全部成功时，最后一行是 `[SUCCESS] Done: N record(s) updated, 0 failed`。缓存文件 `cache.lastip` 只保留最后一次 IP，放在配置文件旁边；`-d` 可以改目录。旧的「时间 IP」多行缓存仍能读出最后一条。
+IP 没变则跳过更新，最后一行是 `[SUCCESS] Done: source=<id> IPv6 ... is unchanged, DNS update skipped`。记录有改动且该源全部成功时，是 `[SUCCESS] Done: source=<id> N record(s) updated, 0 failed`。多个源时再打一行汇总。单源时 `cache.lastip` 仍是裸 IP；多个源时写成 JSON 对象。`-d` 可以改目录。旧的「时间 IP」多行缓存仍能读出最后一条。
 
 ## 运行
 
@@ -109,7 +111,8 @@ IP 没变则跳过更新，最后一行是 `[SUCCESS] Done: IPv6 ... is unchange
 | `--dir` | `-d` | 配置文件所在目录 | 缓存目录 |
 | `--ignore` | `-i` | false | 忽略缓存，强制更新，并且不写缓存 |
 | `--timeout` | `-t` | 300 | 超时（秒） |
-| `--netns` | | 配置文件里的 `netns` | 覆盖配置，只在 Linux 上探测这个 network namespace |
+| `--netns` | | 配置文件里的 `netns` | 单源时覆盖配置；多源时只跑这个 netns 的源 |
+| `--source` | | 全部源 | 只跑这个 `sources[].id` |
 
 `version` 打印版本。
 
@@ -125,7 +128,9 @@ IP 没变则跳过更新，最后一行是 `[SUCCESS] Done: IPv6 ... is unchange
 }
 ```
 
-`config.example.json` 里的 `"netns": ""` 保持宿主机行为。命令行 `--netns vpn` 覆盖配置文件。名字只允许字母、数字、`_`、`.`、`-`，最长 64，禁止 `..`。绝对路径规范化之后必须仍在 `/run/netns/` 下面。FreeBSD 上只要写了 `netns` 就会报错 `netns is only supported on Linux`。
+`config.example.json` 里的 `"netns": ""` 保持宿主机行为。一份配置里要同时更新宿主机和 vpn 时，用 `sources`，记录上写 `"source": "host"` 或 `"source": "vpn"`。不要同时写顶层 `netns`/`interface` 和 `sources`。
+
+命令行 `--netns vpn` 在单源文件里覆盖配置；在多源文件里只跑那个 netns。宿主机源用 `--source host`。名字只允许字母、数字、`_`、`.`、`-`，最长 64，禁止 `..`。绝对路径规范化之后必须仍在 `/run/netns/` 下面。FreeBSD 上只要写了 `netns` 就会报错 `netns is only supported on Linux`。
 
 需要 root，或者 `CAP_SYS_ADMIN`（`setns`）。不要给二进制加 setuid。
 

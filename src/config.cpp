@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <ranges>
 #include <string>
@@ -26,17 +27,18 @@ namespace config {
 
 namespace {
 
-constexpr std::array<std::string_view, 6> kRootKeys{
-    "interface", "fallback_urls", "proxy", "cloudflare", "aliyun", "netns",
+constexpr std::array<std::string_view, 7> kRootKeys{
+    "interface", "fallback_urls", "proxy", "cloudflare", "aliyun", "netns", "sources",
 };
 constexpr std::array<std::string_view, 2> kCloudflareKeys{"token", "records"};
-constexpr std::array<std::string_view, 5> kCloudflareRecordKeys{
-    "name", "zone_id", "ttl", "proxied", "use_proxy",
+constexpr std::array<std::string_view, 6> kCloudflareRecordKeys{
+    "name", "source", "zone_id", "ttl", "proxied", "use_proxy",
 };
 constexpr std::array<std::string_view, 3> kAliyunKeys{
     "access_key_id", "access_key_secret", "records",
 };
-constexpr std::array<std::string_view, 3> kAliyunRecordKeys{"name", "ttl", "use_proxy"};
+constexpr std::array<std::string_view, 4> kAliyunRecordKeys{"name", "source", "ttl", "use_proxy"};
+constexpr std::array<std::string_view, 4> kSourceKeys{"id", "netns", "interface", "fallback_urls"};
 
 std::string trim_copy(std::string_view text) {
     return std::string{text::trim(text)};
@@ -202,41 +204,98 @@ template <std::size_t N>
     return true;
 }
 
-[[nodiscard]] bool validate_netns(const Config& cfg) {
-    if (cfg.netns.empty()) return true;
+[[nodiscard]] bool source_id_ok(std::string_view id) {
+    return netns::detail::netns_name_ok(id);
+}
+
+[[nodiscard]] std::string default_source_id(const IPSource& src) {
+    if (!src.id.empty()) return src.id;
+    if (src.netns.empty()) return "host";
+    auto name = fs::path{src.netns}.filename().string();
+    return name.empty() ? src.netns : name;
+}
+
+[[nodiscard]] bool validate_ip_source(const IPSource& src, std::string_view where) {
+    const auto prefix = where.empty() ? std::string{} : std::format("{}: ", where);
+    if (!src.netns.empty()) {
 #if !defined(__linux__)
-    logger::error("Config: netns is only supported on Linux");
-    return false;
-#else
-    if (cfg.ip_source.interface_name.empty()) {
-        logger::error("Config: interface is required when netns is set");
+        logger::error("Config: {}netns is only supported on Linux", prefix);
         return false;
+#else
+        if (src.interface_name.empty()) {
+            logger::error("Config: {}interface is required when netns is set", prefix);
+            return false;
+        }
+        const auto resolved = netns::resolve_netns_path(src.netns);
+        if (!resolved) {
+            logger::error("Config: {}{}", prefix, resolved.error());
+            return false;
+        }
+#endif
     }
-    const auto resolved = netns::resolve_netns_path(cfg.netns);
-    if (!resolved) {
-        logger::error("Config: {}", resolved.error());
+    if (src.netns.empty() && src.interface_name.empty() && src.fallback_urls.empty()) {
+        logger::error("Config: {}either 'interface' or 'fallback_urls' must be configured", prefix);
         return false;
     }
     return true;
-#endif
 }
 
-[[nodiscard]] bool validate_config(const Config& cfg) {
-    if (!validate_netns(cfg)) return false;
+[[nodiscard]] bool validate_config(Config& cfg) {
     if (cfg.records.empty()) {
         logger::error("Config: at least one record must be configured");
         return false;
     }
-    if (cfg.netns.empty() && cfg.ip_source.interface_name.empty() && cfg.ip_source.fallback_urls.empty()) {
-        logger::error("Config: either 'interface' or 'fallback_urls' must be configured");
+    if (cfg.sources.empty()) {
+        logger::error("Config: sources must not be empty");
         return false;
     }
+
+    std::map<std::string, std::size_t> seen;
+    for (auto&& [i, src] : std::views::enumerate(cfg.sources)) {
+        const std::string where = cfg.explicit_sources ? std::format("sources[{}]", i) : std::string{};
+        if (!validate_ip_source(src, where)) return false;
+        if (src.id.empty()) {
+            logger::error("Config: {}id is required", where.empty() ? "" : where + ": ");
+            return false;
+        }
+        if (!source_id_ok(src.id)) {
+            logger::error("Config: {}invalid id '{}'", where.empty() ? "" : where + ": ", src.id);
+            return false;
+        }
+        if (seen.contains(src.id)) {
+            logger::error("Config: {}duplicate id '{}'", where.empty() ? "" : where + ": ", src.id);
+            return false;
+        }
+        seen.emplace(src.id, static_cast<std::size_t>(i));
+    }
+
     if (!cfg.proxy.empty() && !validate_proxy_url(cfg.proxy)) {
         logger::error("Config: invalid proxy '{}'", cfg.proxy);
         return false;
     }
-    for (std::size_t i = 0; i < cfg.records.size(); ++i) {
-        if (!validate_record(cfg.records[i], i, cfg.proxy)) return false;
+
+    const bool multi = cfg.sources.size() > 1;
+    std::map<std::string, int> used;
+    for (auto&& [i, record] : std::views::enumerate(cfg.records)) {
+        if (record.source.empty()) {
+            if (multi) {
+                logger::error("Config: record[{}]: source is required when multiple sources are configured", i);
+                return false;
+            }
+            record.source = cfg.sources.front().id;
+        }
+        if (!seen.contains(record.source)) {
+            logger::error("Config: record[{}]: unknown source '{}'", i, record.source);
+            return false;
+        }
+        used[record.source]++;
+        if (!validate_record(record, static_cast<std::size_t>(i), cfg.proxy)) return false;
+    }
+    for (auto&& [i, src] : std::views::enumerate(cfg.sources)) {
+        if (used[src.id] == 0) {
+            logger::error("Config: sources[{}]: id '{}' is not used by any record", i, src.id);
+            return false;
+        }
     }
     return true;
 }
@@ -272,6 +331,13 @@ template <std::size_t N>
         if (!read_ttl(body, record.ttl, where)) return false;
         if (!read_bool(body, "proxied", record.proxied, where)) return false;
         if (!read_bool(body, "use_proxy", record.use_proxy, where)) return false;
+        if (body.contains("source")) {
+            if (!body["source"].is_string()) {
+                logger::error("Config: {}: source must be a string", where);
+                return false;
+            }
+            record.source = trim_copy(body["source"].get<std::string>());
+        }
         cfg.records.push_back(std::move(record));
     }
     return true;
@@ -313,6 +379,13 @@ template <std::size_t N>
         if (!fill_name(record, body, where)) return false;
         if (!read_ttl(body, record.ttl, where)) return false;
         if (!read_bool(body, "use_proxy", record.use_proxy, where)) return false;
+        if (body.contains("source")) {
+            if (!body["source"].is_string()) {
+                logger::error("Config: {}: source must be a string", where);
+                return false;
+            }
+            record.source = trim_copy(body["source"].get<std::string>());
+        }
         cfg.records.push_back(std::move(record));
     }
     return true;
@@ -347,19 +420,8 @@ std::optional<Config> read_config(const fs::path& path) {
     }
     if (!allowed_keys(root, kRootKeys, "config")) return std::nullopt;
 
-    Config cfg{
-        .ip_source = {},
-        .proxy = {},
-        .netns = {},
-        .records = {},
-    };
-    if (root.contains("interface")) {
-        if (!root["interface"].is_string()) {
-            logger::error("Config: interface must be a string");
-            return std::nullopt;
-        }
-        cfg.ip_source.interface_name = trim_copy(root["interface"].get<std::string>());
-    }
+    Config cfg{};
+    std::vector<std::string> top_urls;
     if (root.contains("fallback_urls")) {
         if (!root["fallback_urls"].is_array()) {
             logger::error("Config: fallback_urls must be an array");
@@ -370,7 +432,7 @@ std::optional<Config> read_config(const fs::path& path) {
                 logger::error("Config: fallback_urls entries must be non-empty strings");
                 return std::nullopt;
             }
-            cfg.ip_source.fallback_urls.push_back(trim_copy(url.get<std::string>()));
+            top_urls.push_back(trim_copy(url.get<std::string>()));
         }
     }
     if (root.contains("proxy")) {
@@ -380,13 +442,89 @@ std::optional<Config> read_config(const fs::path& path) {
         }
         cfg.proxy = trim_copy(root["proxy"].get<std::string>());
     }
-    if (root.contains("netns")) {
-        if (!root["netns"].is_string()) {
-            logger::error("Config: netns must be a string");
+
+    auto read_urls = [](const json& node, std::string_view where) -> std::optional<std::vector<std::string>> {
+        std::vector<std::string> urls;
+        if (!node.contains("fallback_urls")) return urls;
+        if (!node["fallback_urls"].is_array()) {
+            logger::error("Config: {}: fallback_urls must be an array", where);
             return std::nullopt;
         }
-        cfg.netns = trim_copy(root["netns"].get<std::string>());
+        for (const auto& url : node["fallback_urls"]) {
+            if (!url.is_string() || trim_copy(url.get<std::string>()).empty()) {
+                logger::error("Config: {}: fallback_urls entries must be non-empty strings", where);
+                return std::nullopt;
+            }
+            urls.push_back(trim_copy(url.get<std::string>()));
+        }
+        return urls;
+    };
+
+    if (root.contains("sources")) {
+        if (root.contains("netns") || root.contains("interface")) {
+            logger::error("Config: top-level netns/interface cannot be set when sources is present");
+            return std::nullopt;
+        }
+        if (!root["sources"].is_array() || root["sources"].empty()) {
+            logger::error("Config: sources must not be empty");
+            return std::nullopt;
+        }
+        cfg.explicit_sources = true;
+        for (std::size_t i = 0; i < root["sources"].size(); ++i) {
+            const auto& body = root["sources"][i];
+            const std::string where = std::format("sources[{}]", i);
+            if (!allowed_keys(body, kSourceKeys, where)) return std::nullopt;
+            IPSource src;
+            if (body.contains("id")) {
+                if (!body["id"].is_string()) {
+                    logger::error("Config: {}: id must be a string", where);
+                    return std::nullopt;
+                }
+                src.id = trim_copy(body["id"].get<std::string>());
+            }
+            if (body.contains("netns")) {
+                if (!body["netns"].is_string()) {
+                    logger::error("Config: {}: netns must be a string", where);
+                    return std::nullopt;
+                }
+                src.netns = trim_copy(body["netns"].get<std::string>());
+            }
+            if (body.contains("interface")) {
+                if (!body["interface"].is_string()) {
+                    logger::error("Config: {}: interface must be a string", where);
+                    return std::nullopt;
+                }
+                src.interface_name = trim_copy(body["interface"].get<std::string>());
+            }
+            auto urls = read_urls(body, where);
+            if (!urls) return std::nullopt;
+            src.fallback_urls = urls->empty() ? top_urls : std::move(*urls);
+            cfg.sources.push_back(std::move(src));
+        }
+        if (cfg.sources.size() == 1 && cfg.sources.front().id.empty()) {
+            cfg.sources.front().id = default_source_id(cfg.sources.front());
+        }
+    } else {
+        IPSource src;
+        src.fallback_urls = top_urls;
+        if (root.contains("interface")) {
+            if (!root["interface"].is_string()) {
+                logger::error("Config: interface must be a string");
+                return std::nullopt;
+            }
+            src.interface_name = trim_copy(root["interface"].get<std::string>());
+        }
+        if (root.contains("netns")) {
+            if (!root["netns"].is_string()) {
+                logger::error("Config: netns must be a string");
+                return std::nullopt;
+            }
+            src.netns = trim_copy(root["netns"].get<std::string>());
+        }
+        src.id = default_source_id(src);
+        cfg.sources.push_back(std::move(src));
     }
+
     if (root.contains("cloudflare") && !append_cloudflare(cfg, root["cloudflare"])) return std::nullopt;
     if (root.contains("aliyun") && !append_aliyun(cfg, root["aliyun"])) return std::nullopt;
     if (!validate_config(cfg)) return std::nullopt;
@@ -394,10 +532,54 @@ std::optional<Config> read_config(const fs::path& path) {
 }
 
 bool apply_netns_override(Config& cfg, std::string_view netns_name) {
-    const std::string trimmed = trim_copy(netns_name);
-    if (trimmed.empty()) return true;
-    cfg.netns = trimmed;
-    return validate_netns(cfg);
+    return apply_run_filter(cfg, netns_name, {});
+}
+
+bool apply_run_filter(Config& cfg, std::string_view netns_name, std::string_view source_id) {
+    const std::string netns = trim_copy(netns_name);
+    const std::string source = trim_copy(source_id);
+    if (netns.empty() && source.empty()) return true;
+
+    if (!cfg.explicit_sources) {
+        if (!source.empty() && (cfg.sources.size() != 1 || cfg.sources.front().id != source)) {
+            logger::error("Config: source '{}' does not match configured source '{}'",
+                          source, cfg.sources.empty() ? "" : cfg.sources.front().id);
+            return false;
+        }
+        if (netns.empty()) return true;
+        if (cfg.sources.size() != 1) {
+            logger::error("Config: no source to override");
+            return false;
+        }
+        auto next = cfg.sources.front();
+        next.netns = netns;
+        if (!validate_ip_source(next, {})) return false;
+        cfg.sources.front() = std::move(next);
+        return true;
+    }
+
+    auto matched = cfg.sources
+                   | std::views::filter([&](const IPSource& src) {
+                         if (!source.empty() && src.id != source) return false;
+                         return netns.empty() || src.netns == netns;
+                     })
+                   | std::ranges::to<std::vector>();
+    if (matched.empty()) {
+        logger::error("Config: no source matched netns='{}' source='{}'", netns, source);
+        return false;
+    }
+    if (!netns.empty() && source.empty() && matched.size() != 1) {
+        logger::error("Config: netns '{}' matches {} sources", netns, matched.size());
+        return false;
+    }
+    cfg.sources = std::move(matched);
+    return true;
+}
+
+std::vector<RecordConfig> records_for_source(const Config& cfg, std::string_view id) {
+    return cfg.records
+           | std::views::filter([&](const RecordConfig& rec) { return rec.source == id; })
+           | std::ranges::to<std::vector>();
 }
 
 fs::path get_cache_file_path(const fs::path& config_abs_path, const fs::path& base_dir) {

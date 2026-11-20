@@ -1,8 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace cache {
 
@@ -19,5 +21,18 @@ struct CacheFileData {
 
 /// Overwrite the cache with a single IP line.
 [[nodiscard]] bool write_last_ip(const std::filesystem::path& path, std::string_view ip);
+
+struct SourceIPCache {
+    std::filesystem::path path;
+    bool multi = false;
+    std::map<std::string, std::string> ips;
+
+    [[nodiscard]] std::string get(std::string_view id) const;
+    [[nodiscard]] bool put(std::string_view id, std::string_view ip);
+};
+
+[[nodiscard]] SourceIPCache load_source_ip_cache(const std::filesystem::path& path,
+                                                 const std::vector<std::string>& source_ids,
+                                                 int orig_count);
 
 } // namespace cache

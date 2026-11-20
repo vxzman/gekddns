@@ -24,14 +24,17 @@ inline constexpr uint32_t ND6_INFINITE_LIFETIME = 0xFFFFFFFFU;
 inline constexpr long INFINITE_LIFETIME_SECONDS = 1000000000000L;
 
 struct IPSource {
+    std::string id;
     std::string interface_name;
     std::vector<std::string> fallback_urls;
+    std::string netns; ///< empty: discover on the host.
 };
 
 struct RecordConfig {
     std::string provider{};
     std::string zone{};
     std::string name{};          ///< RR label; "@" is the zone apex
+    std::string source{};        ///< sources[].id
     std::string type = "AAAA";
     int ttl = 0;
     bool proxied = false;
@@ -43,9 +46,9 @@ struct RecordConfig {
 };
 
 struct Config {
-    IPSource ip_source;
+    std::vector<IPSource> sources;
+    bool explicit_sources = false;
     std::string proxy;
-    std::string netns;         ///< empty: discover on the host. Linux name or /run/netns path.
     std::vector<RecordConfig> records;
 };
 
@@ -59,6 +62,11 @@ struct Config {
 
 /// Replace netns when the CLI passed a non-empty value, then validate it.
 [[nodiscard]] bool apply_netns_override(Config& cfg, std::string_view netns_name);
+
+/// Apply --netns and --source. Empty values are ignored.
+[[nodiscard]] bool apply_run_filter(Config& cfg, std::string_view netns_name, std::string_view source_id);
+
+[[nodiscard]] std::vector<RecordConfig> records_for_source(const Config& cfg, std::string_view id);
 
 [[nodiscard]] std::filesystem::path get_cache_file_path(const std::filesystem::path& config_abs_path,
                                                         const std::filesystem::path& work_dir);
